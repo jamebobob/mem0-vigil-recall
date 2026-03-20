@@ -30,7 +30,7 @@ Correspond to upstream PRs #4409-4412 (sitting in 2-month backlog).
 | `3526d468` | fix(oss): add JSON extraction fallback to removeCodeBlocks |
 | `d95a6939` | fix(oss): bump AnthropicLLM max_tokens from 4096 to 8192 |
 
-### Multi-Pool Plugin Patches (5 commits)
+### Multi-Pool Plugin Patches (4 commits)
 
 Replace the old per-agent userId namespacing system with configurable
 named pool routing via `agentMemory` config.
@@ -41,15 +41,15 @@ named pool routing via `agentMemory` config.
 | `24b0ef52` | feat(plugin): add getCapturePool and getRecallPools |
 | `6787fe8c` | feat(plugin): add isPoolAllowed pool boundary enforcement |
 | `e26fa3be` | feat(plugin): rewire tools and hooks for multi-pool memory system |
-| `afad44ed` | fix(plugin): wrap recall guard in independent try/catch (fail-open) |
 
-### Vigil Modules (3 commits)
+### Vigil Modules (4 commits)
 
 | Hash | Description |
 |------|-------------|
 | `d12957ed` | feat(plugin): add recall telemetry module (Vigil A1a+A1b) |
 | `144025f4` | feat(plugin): add capture filter for LCM re-extraction prevention (Vigil B1) |
 | `0f64ca46` | feat(plugin): add recall guard with privacy boundary enforcement (Vigil A2) |
+| `afad44ed` | fix(plugin): wrap recall guard in independent try/catch (fail-open) |
 
 ### Documentation + Tooling (4 commits)
 
@@ -148,6 +148,10 @@ A5 (significance-weighted recall) and A6 (never-recalled cleanup) both
 require 2-4 weeks of telemetry data before they can be designed or run.
 The telemetry module is recording data from the moment it's deployed.
 
+### Cron audit (Vigil Day 6)
+Review of cron job behavior, first telemetry data review, and LCM
+compaction cycle quality check if LCM is enabled.
+
 ### Test suites from PRs #4409-4412
 The Vigil v5 plan mentions porting test suites from the upstream PRs.
 Not done. The 6 SDK patches have no dedicated unit tests beyond the
@@ -166,6 +170,6 @@ This reduced 12 patches to 10 that needed applying. Of those 10:
 - 6 are core SDK patches (commits c21dd88b through d95a6939)
 - 4 are multi-pool plugin patches (commits 575fc2a4 through e26fa3be)
 
-The guard try/catch fix (afad44ed) was found during audit and is
-commit 15 — a bugfix on top of the multi-pool rewire, not one of the
+The guard try/catch fix (afad44ed) was found during audit and is a
+bugfix on top of the Vigil recall guard wiring, not one of the
 original 10 patches.

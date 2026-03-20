@@ -19,7 +19,6 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from glob import glob
-from pathlib import Path
 
 try:
     import requests
@@ -52,7 +51,9 @@ def parse_recalled_point_ids(jsonl_dir: str) -> set[str]:
 
 def fetch_old_points(qdrant_url: str, threshold_days: int) -> list[dict]:
     """Scroll through Qdrant for all points with createdAt older than threshold."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=threshold_days)).isoformat()
+    # Use Z suffix to match JS Date.toISOString() format stored in Qdrant
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=threshold_days)
+    cutoff = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     url = f"{qdrant_url}/collections/{COLLECTION}/points/scroll"
 
     all_points = []

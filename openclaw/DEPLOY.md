@@ -189,14 +189,20 @@ verify-patches.py intact. If regressions are found:
 ### Revert to published package
 
 ```bash
-# Unlink the fork
+# Unlink the fork and reinstall the published npm package
 openclaw plugins install @mem0/openclaw-mem0
+
+# Re-apply node_modules patches to the reinstalled package.
+# The published package does NOT have the 6 SDK patches (dedup,
+# threshold, max_tokens, etc.). These must be re-applied.
+python3 ~/.openclaw/workspace/verify-patches.py --apply
+# If verify-patches.py doesn't have an --apply flag, re-apply
+# patches manually from the patch files in the workspace.
+# Then verify:
+python3 ~/.openclaw/workspace/verify-patches.py
 
 # Restart gateway
 sudo systemctl restart <gateway-service-name>
-
-# Verify patches still apply to the reinstalled package
-python3 ~/.openclaw/workspace/verify-patches.py
 ```
 
 ### Restore config if needed
@@ -215,7 +221,11 @@ Only if data corruption is suspected:
 curl http://localhost:6333/collections/memories/snapshots
 
 # Restore (DESTRUCTIVE -- replaces current data)
-curl -X PUT "http://localhost:6333/collections/memories/snapshots/<snapshot-name>/recover"
+# The snapshot file path is typically /qdrant/snapshots/memories/<snapshot-name>
+curl -X PUT "http://localhost:6333/collections/memories/snapshots/recover" \
+  -H "Content-Type: application/json" \
+  -d '{"location": "file:///qdrant/snapshots/memories/<snapshot-name>"}'
+# If the path is wrong, check: ls /qdrant/snapshots/memories/
 ```
 
 ### After 7 clean days
@@ -233,9 +243,10 @@ curl -X PUT "http://localhost:6333/collections/memories/snapshots/<snapshot-name
 
 - **Don't delete node_modules patches during the 7-day window.**
   They are your rollback path.
-- **Don't run `openclaw` CLI commands during deploy** (e.g.
-  `openclaw restart`, `openclaw reload`). These cause blackouts.
-  Use `systemctl` for service management.
+- **Don't use `openclaw restart` or `openclaw reload` to restart
+  the gateway.** These cause blackouts. Use `systemctl` for service
+  management. (`openclaw plugins install` is safe — it modifies
+  config without restarting the running process.)
 - **Don't deploy on a day when gateway can't be monitored** for at
   least 2-3 hours afterward. the assistant needs to be observed in both DM
   and group contexts.
