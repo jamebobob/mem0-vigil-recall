@@ -495,10 +495,12 @@ export class Memory {
 
     // Search vector store
     const queryEmbedding = await this.embedder.embed(query);
+    const searchThreshold = config.threshold != null ? config.threshold : undefined;
     const memories = await this.vectorStore.search(
       queryEmbedding,
       limit,
       filters,
+      searchThreshold,
     );
 
     // Search graph store if available
