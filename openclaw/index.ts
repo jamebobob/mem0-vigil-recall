@@ -20,6 +20,8 @@ import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { logRecallEvent, mapCtx } from "./recall-telemetry.js";
 import { filterCaptureMessages } from "./capture-filter.js";
+import { applyRecallGuard, loadMemoryViewsConfig } from "./recall-guard.js";
+import type { MemoryViewConfig } from "./recall-guard.js";
 
 // ============================================================================
 // Types
@@ -678,6 +680,11 @@ const memoryPlugin = {
     // Track current session ID for tool-level session scoping
     let currentSessionId: string | undefined;
     let currentAgentId: string | undefined;
+
+    // Load recall guard config (runtime file or bundled default)
+    const memoryViewsConfig: MemoryViewConfig = loadMemoryViewsConfig(
+      (p) => api.resolvePath(p),
+    );
 
     api.logger.info(
       `openclaw-mem0: registered (mode: ${cfg.mode}, user: ${cfg.userId}, graph: ${cfg.enableGraph}, autoRecall: ${cfg.autoRecall}, autoCapture: ${cfg.autoCapture})`,
@@ -1583,15 +1590,25 @@ const memoryPlugin = {
           allResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
           allResults = allResults.slice(0, cfg.topK);
 
-          // Recall telemetry (fires on every recall, including gaps)
+          // Recall guard: filter by session context (privacy boundaries)
           const sessionInfo = extractSessionInfo(sessionId);
+          const ctxType = mapCtx(sessionInfo.conversationType);
+          const guardResult = applyRecallGuard({
+            results: allResults,
+            ctx: ctxType,
+            config: memoryViewsConfig,
+          });
+          allResults = guardResult.results;
+
+          // Recall telemetry (fires on every recall, including gaps)
           logRecallEvent({
             agent: agentId ?? "main",
-            ctx: mapCtx(sessionInfo.conversationType),
+            ctx: ctxType,
             query: event.prompt,
             results: allResults,
             pools,
             recallType: "auto",
+            filteredByGuard: guardResult.removedCount,
             threshold: cfg.searchThreshold,
             resolvePath: (p) => api.resolvePath(p),
           });

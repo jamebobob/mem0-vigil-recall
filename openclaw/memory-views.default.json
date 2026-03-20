@@ -1,0 +1,10 @@
+{
+  "views": {
+    "dm": { "mode": "allow-all" },
+    "group": {
+      "mode": "deny-private",
+      "allowed_pools": ["family"]
+    },
+    "cron": { "mode": "deny-private" }
+  }
+}
