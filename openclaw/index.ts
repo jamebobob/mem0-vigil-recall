@@ -10,8 +10,8 @@
  * - Short-term (session-scoped) and long-term (user-scoped) memory
  * - Auto-recall: injects relevant memories (both scopes) before each agent turn
  * - Auto-capture: stores key facts scoped to the current session after each agent turn
- * - Per-agent isolation: multi-agent setups write/read from separate userId namespaces
- *   automatically via sessionKey routing (zero breaking changes for single-agent setups)
+ * - Multi-pool memory: agents write/read from configurable named pools (via agentMemory
+ *   config) with fail-closed boundary enforcement and provenance metadata
  * - CLI: openclaw mem0 search, openclaw mem0 stats
  * - Dual mode: platform or open-source (self-hosted)
  */
@@ -727,15 +727,6 @@ const memoryPlugin = {
       return allowed.includes(pool);
     }
 
-    // Temporary compatibility stubs — removed when tools are rewired for multi-pool
-    const _effectiveUserId = (_sessionKey?: string) => cfg.userId;
-    const _agentUserId = (id: string) => `${cfg.userId}:agent:${id}`;
-    const _resolveUserId = (opts: { agentId?: string; userId?: string }) => {
-      if (opts.agentId) return `${cfg.userId}:agent:${opts.agentId}`;
-      if (opts.userId) return opts.userId;
-      return cfg.userId;
-    };
-
     // Helper: build add options
     function buildAddOptions(userIdOverride?: string, runId?: string, metadata?: Record<string, unknown>): AddOptions {
       const opts: AddOptions = {
@@ -795,12 +786,6 @@ const memoryPlugin = {
                 "User ID to scope search (default: configured userId)",
             }),
           ),
-          agentId: Type.Optional(
-            Type.String({
-              description:
-                "Agent ID to search memories for a specific agent (e.g. \"researcher\"). Overrides userId.",
-            }),
-          ),
           scope: Type.Optional(
             Type.Union([
               Type.Literal("session"),
@@ -813,50 +798,102 @@ const memoryPlugin = {
           ),
         }),
         async execute(_toolCallId, params) {
-          const { query, limit, userId, agentId, scope = "all" } = params as {
+          const { query, limit, userId, scope = "all" } = params as {
             query: string;
             limit?: number;
             userId?: string;
-            agentId?: string;
             scope?: "session" | "long-term" | "all";
           };
 
           try {
             let results: MemoryItem[] = [];
-            const uid = _resolveUserId({ agentId, userId });
+            // B7 FIX: Snapshot agentId before any await
+            const agentId = currentAgentId;
+
+            // B2 FIX: Validate userId against pool boundaries
+            if (userId && !isPoolAllowed(userId, agentId)) {
+              return {
+                content: [
+                  { type: "text", text: "Access denied: pool not in recall list" },
+                ],
+                details: { error: "pool_boundary" },
+              };
+            }
 
             if (scope === "session") {
               if (currentSessionId) {
+                const pool = userId || getCapturePool(agentId);
+                // H1 FIX: Deny if pool unknown (agentId resolution failed)
+                if (!pool) {
+                  return {
+                    content: [
+                      { type: "text", text: "Access denied: agent identity unknown" },
+                    ],
+                    details: { error: "unknown_agent" },
+                  };
+                }
                 results = await provider.search(
                   query,
-                  buildSearchOptions(uid, limit, currentSessionId),
+                  buildSearchOptions(pool, limit, currentSessionId),
                 );
               }
             } else if (scope === "long-term") {
-              results = await provider.search(
-                query,
-                buildSearchOptions(uid, limit),
-              );
-            } else {
-              // "all" — search both scopes and combine
-              const longTermResults = await provider.search(
-                query,
-                buildSearchOptions(uid, limit),
-              );
-              let sessionResults: MemoryItem[] = [];
-              if (currentSessionId) {
-                sessionResults = await provider.search(
+              if (userId) {
+                // Explicit userId override (already validated above)
+                results = await provider.search(
                   query,
-                  buildSearchOptions(uid, limit, currentSessionId),
+                  buildSearchOptions(userId, limit),
                 );
+              } else {
+                // Multi-pool: search all recall pools
+                const pools = getRecallPools(agentId);
+                for (const pool of pools) {
+                  const poolResults = await provider.search(
+                    query,
+                    buildSearchOptions(pool, limit),
+                  );
+                  results.push(...poolResults);
+                }
               }
-              // Deduplicate by ID, preferring long-term
-              const seen = new Set(longTermResults.map((r) => r.id));
-              results = [
-                ...longTermResults,
-                ...sessionResults.filter((r) => !seen.has(r.id)),
-              ];
+            } else {
+              // "all" - search all recall pools + session
+              if (userId) {
+                results = await provider.search(
+                  query,
+                  buildSearchOptions(userId, limit),
+                );
+              } else {
+                const pools = getRecallPools(agentId);
+                for (const pool of pools) {
+                  const poolResults = await provider.search(
+                    query,
+                    buildSearchOptions(pool, limit),
+                  );
+                  results.push(...poolResults);
+                }
+              }
+              if (currentSessionId) {
+                const capturePool = userId || getCapturePool(agentId);
+                // H1 FIX: Skip session search if pool unknown
+                if (capturePool) {
+                  const sessionResults = await provider.search(
+                    query,
+                    buildSearchOptions(capturePool, limit, currentSessionId),
+                  );
+                  results.push(...sessionResults);
+                }
+              }
             }
+            // Deduplicate by ID
+            const seen = new Set<string>();
+            results = results.filter((r) => {
+              if (seen.has(r.id)) return false;
+              seen.add(r.id);
+              return true;
+            });
+            // Sort by relevance, cap at topK
+            results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+            results = results.slice(0, limit ?? cfg.topK);
 
             if (!results || results.length === 0) {
               return {
@@ -920,12 +957,6 @@ const memoryPlugin = {
               description: "User ID to scope this memory",
             }),
           ),
-          agentId: Type.Optional(
-            Type.String({
-              description:
-                "Agent ID to store memory under a specific agent's namespace (e.g. \"researcher\"). Overrides userId.",
-            }),
-          ),
           metadata: Type.Optional(
             Type.Record(Type.String(), Type.Unknown(), {
               description: "Optional metadata to attach to this memory",
@@ -939,20 +970,49 @@ const memoryPlugin = {
           ),
         }),
         async execute(_toolCallId, params) {
-          const { text, userId, agentId, longTerm = true } = params as {
+          const { text, userId, longTerm = true } = params as {
             text: string;
             userId?: string;
-            agentId?: string;
             metadata?: Record<string, unknown>;
             longTerm?: boolean;
           };
 
           try {
-            const uid = _resolveUserId({ agentId, userId });
+            // B7 FIX: Snapshot agentId before any await
+            const agentId = currentAgentId;
+            const sessionInfo = extractSessionInfo(currentSessionId);
+
+            // B6 FIX: Validate userId against pool boundaries for writes
+            if (userId && !isPoolAllowed(userId, agentId)) {
+              return {
+                content: [
+                  { type: "text", text: "Access denied: pool not in recall list" },
+                ],
+                details: { error: "pool_boundary" },
+              };
+            }
+
+            const capturePool = userId || getCapturePool(agentId);
+            // B8 FIX: Guard against undefined capturePool (agent identity unknown)
+            if (!capturePool) {
+              return {
+                content: [
+                  { type: "text", text: "Cannot store: agent identity unknown" },
+                ],
+                details: { error: "unknown_agent" },
+              };
+            }
             const runId = !longTerm && currentSessionId ? currentSessionId : undefined;
+            const provenance: Record<string, unknown> = {
+              is_private: sessionInfo.conversationType !== "group",
+              source_channel: sessionInfo.channel ?? "unknown",
+              conversation_type: sessionInfo.conversationType ?? "unknown",
+              chat_id: sessionInfo.chatId,
+              agent_id: agentId ?? "main",
+            };
             const result = await provider.add(
               [{ role: "user", content: text }],
-              buildAddOptions(uid, runId),
+              buildAddOptions(capturePool, runId, provenance),
             );
 
             const added =
@@ -1012,7 +1072,19 @@ const memoryPlugin = {
           const { memoryId } = params as { memoryId: string };
 
           try {
+            // B7 FIX: Snapshot agentId before any await
+            const agentId = currentAgentId;
             const memory = await provider.get(memoryId);
+
+            // B3+W1 FIX: Fail-closed — deny if user_id missing OR not in allowed pools
+            if (!memory.user_id || !isPoolAllowed(memory.user_id, agentId)) {
+              return {
+                content: [
+                  { type: "text", text: "Access denied: memory not in recall pools" },
+                ],
+                details: { error: "pool_boundary" },
+              };
+            }
 
             return {
               content: [
@@ -1044,18 +1116,12 @@ const memoryPlugin = {
         name: "memory_list",
         label: "Memory List",
         description:
-          "List all stored memories for a user or agent. Use this when you want to see everything that's been remembered, rather than searching for something specific.",
+          "List all stored memories for a user. Use this when you want to see everything that's been remembered, rather than searching for something specific.",
         parameters: Type.Object({
           userId: Type.Optional(
             Type.String({
               description:
                 "User ID to list memories for (default: configured userId)",
-            }),
-          ),
-          agentId: Type.Optional(
-            Type.String({
-              description:
-                "Agent ID to list memories for a specific agent (e.g. \"researcher\"). Overrides userId.",
             }),
           ),
           scope: Type.Optional(
@@ -1070,39 +1136,83 @@ const memoryPlugin = {
           ),
         }),
         async execute(_toolCallId, params) {
-          const { userId, agentId, scope = "all" } = params as { userId?: string; agentId?: string; scope?: "session" | "long-term" | "all" };
+          const { userId, scope = "all" } = params as { userId?: string; scope?: "session" | "long-term" | "all" };
 
           try {
             let memories: MemoryItem[] = [];
-            const uid = _resolveUserId({ agentId, userId });
+            // B7 FIX: Snapshot agentId before any await
+            const agentId = currentAgentId;
+
+            // B2 FIX: Validate userId against pool boundaries
+            if (userId && !isPoolAllowed(userId, agentId)) {
+              return {
+                content: [
+                  { type: "text", text: "Access denied: pool not in recall list" },
+                ],
+                details: { error: "pool_boundary" },
+              };
+            }
 
             if (scope === "session") {
               if (currentSessionId) {
+                const pool = userId || getCapturePool(agentId);
+                // H1 FIX: Deny if pool unknown (agentId resolution failed)
+                if (!pool) {
+                  return {
+                    content: [
+                      { type: "text", text: "Access denied: agent identity unknown" },
+                    ],
+                    details: { error: "unknown_agent" },
+                  };
+                }
                 memories = await provider.getAll({
-                  user_id: uid,
+                  user_id: pool,
                   run_id: currentSessionId,
                   source: "OPENCLAW",
                 });
               }
             } else if (scope === "long-term") {
-              memories = await provider.getAll({ user_id: uid, source: "OPENCLAW" });
-            } else {
-              // "all" — combine both scopes
-              const longTerm = await provider.getAll({ user_id: uid, source: "OPENCLAW" });
-              let session: MemoryItem[] = [];
-              if (currentSessionId) {
-                session = await provider.getAll({
-                  user_id: uid,
-                  run_id: currentSessionId,
-                  source: "OPENCLAW",
-                });
+              if (userId) {
+                memories = await provider.getAll({ user_id: userId, source: "OPENCLAW" });
+              } else {
+                const pools = getRecallPools(agentId);
+                for (const pool of pools) {
+                  const poolMemories = await provider.getAll({ user_id: pool, source: "OPENCLAW" });
+                  memories.push(...poolMemories);
+                }
               }
-              const seen = new Set(longTerm.map((r) => r.id));
-              memories = [
-                ...longTerm,
-                ...session.filter((r) => !seen.has(r.id)),
-              ];
+            } else {
+              // "all" - list from all recall pools + session
+              if (userId) {
+                memories = await provider.getAll({ user_id: userId, source: "OPENCLAW" });
+              } else {
+                const pools = getRecallPools(agentId);
+                for (const pool of pools) {
+                  const poolMemories = await provider.getAll({ user_id: pool, source: "OPENCLAW" });
+                  memories.push(...poolMemories);
+                }
+              }
+              if (currentSessionId) {
+                const capturePool = userId || getCapturePool(agentId);
+                // H1 FIX: Skip session list if pool unknown
+                if (capturePool) {
+                  const sessionMems = await provider.getAll({
+                    user_id: capturePool,
+                    run_id: currentSessionId,
+                    source: "OPENCLAW",
+                  });
+                  const seenIds = new Set(memories.map((r) => r.id));
+                  memories.push(...sessionMems.filter((r) => !seenIds.has(r.id)));
+                }
+              }
             }
+            // Deduplicate by ID
+            const dedup = new Set<string>();
+            memories = memories.filter((r) => {
+              if (dedup.has(r.id)) return false;
+              dedup.add(r.id);
+              return true;
+            });
 
             if (!memories || memories.length === 0) {
               return {
@@ -1157,7 +1267,7 @@ const memoryPlugin = {
         name: "memory_forget",
         label: "Memory Forget",
         description:
-          "Delete memories from Mem0. Provide a specific memoryId to delete directly, or a query to search and delete matching memories. Supports agent-scoped deletion. GDPR-compliant.",
+          "Delete memories from Mem0. Provide a specific memoryId to delete directly, or a query to search and delete matching memories. GDPR-compliant.",
         parameters: Type.Object({
           query: Type.Optional(
             Type.String({
@@ -1167,22 +1277,27 @@ const memoryPlugin = {
           memoryId: Type.Optional(
             Type.String({ description: "Specific memory ID to delete" }),
           ),
-          agentId: Type.Optional(
-            Type.String({
-              description:
-                "Agent ID to scope deletion to a specific agent's memories (e.g. \"researcher\").",
-            }),
-          ),
         }),
         async execute(_toolCallId, params) {
-          const { query, memoryId, agentId } = params as {
+          const { query, memoryId } = params as {
             query?: string;
             memoryId?: string;
-            agentId?: string;
           };
 
           try {
             if (memoryId) {
+              // B4+W1 FIX: Fail-closed — deny if user_id missing OR not in allowed pools
+              // B7 FIX: Snapshot agentId before any await
+              const agentId = currentAgentId;
+              const mem = await provider.get(memoryId);
+              if (!mem.user_id || !isPoolAllowed(mem.user_id, agentId)) {
+                return {
+                  content: [
+                    { type: "text", text: "Access denied: memory not in recall pools" },
+                  ],
+                  details: { error: "pool_boundary" },
+                };
+              }
               await provider.delete(memoryId);
               return {
                 content: [
@@ -1193,11 +1308,27 @@ const memoryPlugin = {
             }
 
             if (query) {
-              const uid = _resolveUserId({ agentId });
-              const results = await provider.search(
-                query,
-                buildSearchOptions(uid, 5),
-              );
+              // Search across all recall pools for this agent
+              // B7 FIX: Snapshot agentId before any await
+              const agentId = currentAgentId;
+              const pools = getRecallPools(agentId);
+              let results: MemoryItem[] = [];
+              for (const pool of pools) {
+                const poolResults = await provider.search(
+                  query,
+                  buildSearchOptions(pool, 5),
+                );
+                results.push(...poolResults);
+              }
+              // Deduplicate
+              const seenIds = new Set<string>();
+              results = results.filter((r) => {
+                if (seenIds.has(r.id)) return false;
+                seenIds.add(r.id);
+                return true;
+              });
+              results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+              results = results.slice(0, 5);
 
               if (!results || results.length === 0) {
                 return {
@@ -1213,6 +1344,15 @@ const memoryPlugin = {
                 results.length === 1 ||
                 (results[0].score ?? 0) > 0.9
               ) {
+                // H3 FIX: Defense-in-depth — verify result's pool before delete
+                if (!results[0].user_id || !isPoolAllowed(results[0].user_id, agentId)) {
+                  return {
+                    content: [
+                      { type: "text", text: "Access denied: memory not in recall pools" },
+                    ],
+                    details: { error: "pool_boundary" },
+                  };
+                }
                 await provider.delete(results[0].id);
                 return {
                   content: [
@@ -1287,12 +1427,10 @@ const memoryPlugin = {
           .argument("<query>", "Search query")
           .option("--limit <n>", "Max results", String(cfg.topK))
           .option("--scope <scope>", 'Memory scope: "session", "long-term", or "all"', "all")
-          .option("--agent <agentId>", "Search a specific agent's memory namespace")
-          .action(async (query: string, opts: { limit: string; scope: string; agent?: string }) => {
+          .action(async (query: string, opts: { limit: string; scope: string }) => {
             try {
               const limit = parseInt(opts.limit, 10);
               const scope = opts.scope as "session" | "long-term" | "all";
-              const uid = opts.agent ? _agentUserId(opts.agent) : _effectiveUserId(currentSessionId);
 
               let allResults: MemoryItem[] = [];
 
@@ -1300,7 +1438,7 @@ const memoryPlugin = {
                 if (currentSessionId) {
                   const sessionResults = await provider.search(
                     query,
-                    buildSearchOptions(uid, limit, currentSessionId),
+                    buildSearchOptions(undefined, limit, currentSessionId),
                   );
                   if (sessionResults?.length) {
                     allResults.push(...sessionResults.map((r) => ({ ...r, _scope: "session" as const })));
@@ -1314,7 +1452,7 @@ const memoryPlugin = {
               if (scope === "long-term" || scope === "all") {
                 const longTermResults = await provider.search(
                   query,
-                  buildSearchOptions(uid, limit),
+                  buildSearchOptions(undefined, limit),
                 );
                 if (longTermResults?.length) {
                   allResults.push(...longTermResults.map((r) => ({ ...r, _scope: "long-term" as const })));
@@ -1353,16 +1491,14 @@ const memoryPlugin = {
         mem0
           .command("stats")
           .description("Show memory statistics from Mem0")
-          .option("--agent <agentId>", "Show stats for a specific agent")
-          .action(async (opts: { agent?: string }) => {
+          .action(async () => {
             try {
-              const uid = opts.agent ? _agentUserId(opts.agent) : cfg.userId;
               const memories = await provider.getAll({
-                user_id: uid,
+                user_id: cfg.userId,
                 source: "OPENCLAW",
               });
               console.log(`Mode: ${cfg.mode}`);
-              console.log(`User: ${uid}${opts.agent ? ` (agent: ${opts.agent})` : ""}`);
+              console.log(`User: ${cfg.userId}`);
               console.log(
                 `Total memories: ${Array.isArray(memories) ? memories.length : "unknown"}`,
               );
@@ -1387,55 +1523,62 @@ const memoryPlugin = {
       api.on("before_agent_start", async (event, ctx) => {
         if (!event.prompt || event.prompt.length < 5) return;
 
-        // Track session ID
+        // Track session ID and agent ID
         const sessionId = (ctx as any)?.sessionKey ?? undefined;
         if (sessionId) currentSessionId = sessionId;
+        // B7 FIX: Set module-level agentId for tool handlers to snapshot
+        currentAgentId = (ctx as any)?.agentId ?? extractSessionInfo(sessionId).agentId;
 
         try {
-          // Search long-term memories (user-scoped, isolated per agent)
-          const longTermResults = await provider.search(
-            event.prompt,
-            buildSearchOptions(),
-          );
+          const agentId = currentAgentId;
+          const pools = getRecallPools(agentId);
+          // B8 FIX: Fast-path if no pools (agent identity unknown)
+          if (pools.length === 0) return;
+          let allResults: MemoryItem[] = [];
 
-          // Search session memories (session-scoped) if we have a session ID
-          let sessionResults: MemoryItem[] = [];
-          if (currentSessionId) {
-            sessionResults = await provider.search(
+          // Search each recall pool
+          for (const pool of pools) {
+            const results = await provider.search(
               event.prompt,
-              buildSearchOptions(undefined, undefined, currentSessionId),
+              buildSearchOptions(pool),
             );
+            allResults.push(...results);
           }
 
-          // Deduplicate session results against long-term
-          const longTermIds = new Set(longTermResults.map((r) => r.id));
-          const uniqueSessionResults = sessionResults.filter(
-            (r) => !longTermIds.has(r.id),
-          );
-
-          if (longTermResults.length === 0 && uniqueSessionResults.length === 0) return;
-
-          // Build context with clear labels
-          let memoryContext = "";
-          if (longTermResults.length > 0) {
-            memoryContext += longTermResults
-              .map(
-                (r) =>
-                  `- ${r.memory}${r.categories?.length ? ` [${r.categories.join(", ")}]` : ""}`,
-              )
-              .join("\n");
-          }
-          if (uniqueSessionResults.length > 0) {
-            if (memoryContext) memoryContext += "\n";
-            memoryContext += "\nSession memories:\n";
-            memoryContext += uniqueSessionResults
-              .map((r) => `- ${r.memory}`)
-              .join("\n");
+          // Search session memories if we have a session ID
+          if (currentSessionId) {
+            const capturePool = getCapturePool(agentId);
+            const sessionResults = await provider.search(
+              event.prompt,
+              buildSearchOptions(capturePool, undefined, currentSessionId),
+            );
+            allResults.push(...sessionResults);
           }
 
-          const totalCount = longTermResults.length + uniqueSessionResults.length;
+          // Deduplicate by ID
+          const seen = new Set<string>();
+          allResults = allResults.filter((r) => {
+            if (seen.has(r.id)) return false;
+            seen.add(r.id);
+            return true;
+          });
+
+          // Sort by relevance, cap at topK total (not per pool)
+          allResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+          allResults = allResults.slice(0, cfg.topK);
+
+          if (allResults.length === 0) return;
+
+          // Build context with no pool labels
+          const memoryContext = allResults
+            .map(
+              (r) =>
+                `- ${r.memory}${r.categories?.length ? ` [${r.categories.join(", ")}]` : ""}`,
+            )
+            .join("\n");
+
           api.logger.info(
-            `openclaw-mem0: injecting ${totalCount} memories into context (${longTermResults.length} long-term, ${uniqueSessionResults.length} session)`,
+            `openclaw-mem0: injecting ${allResults.length} memories into context (pools: ${pools.join(", ")})`,
           );
 
           return {
@@ -1446,6 +1589,13 @@ const memoryPlugin = {
         }
       });
     }
+
+    // B7 FIX: Refresh currentAgentId right before each tool executes.
+    // Fires synchronously before execute(), closing the race window.
+    api.on("before_tool_call", async (_event, ctx) => {
+      const hookAgentId = (ctx as any)?.agentId;
+      if (hookAgentId) currentAgentId = hookAgentId;
+    });
 
     // Auto-capture: store conversation context after agent ends
     if (cfg.autoCapture) {
@@ -1508,7 +1658,25 @@ const memoryPlugin = {
 
           if (formattedMessages.length === 0) return;
 
-          const addOpts = buildAddOptions(undefined, currentSessionId);
+          // B5+B7 FIX: Use ctx.agentId, fall back to module-level currentAgentId
+          const agentId = (ctx as any)?.agentId ?? currentAgentId;
+          // H2 FIX: Snapshot sessionId from ctx (turn-scoped) to avoid racy module-level read
+          const safeSessionId = (ctx as any)?.sessionKey ?? currentSessionId;
+          const capturePool = getCapturePool(agentId);
+          // B8 FIX: Skip capture if agent identity unknown (fail-closed)
+          if (!capturePool) {
+            api.logger.warn("openclaw-mem0: skipping capture -- agent identity unknown, fail-closed");
+            return;
+          }
+          const sessionInfo = extractSessionInfo(safeSessionId);
+          const provenance: Record<string, unknown> = {
+            is_private: sessionInfo.conversationType !== "group",
+            source_channel: sessionInfo.channel ?? "unknown",
+            conversation_type: sessionInfo.conversationType ?? "unknown",
+            chat_id: sessionInfo.chatId,
+            agent_id: agentId ?? "main",
+          };
+          const addOpts = buildAddOptions(capturePool, safeSessionId, provenance);
           const result = await provider.add(
             formattedMessages,
             addOpts,
@@ -1517,7 +1685,7 @@ const memoryPlugin = {
           const capturedCount = result.results?.length ?? 0;
           if (capturedCount > 0) {
             api.logger.info(
-              `openclaw-mem0: auto-captured ${capturedCount} memories`,
+              `openclaw-mem0: auto-captured ${capturedCount} memories (pool: ${capturePool})`,
             );
           }
         } catch (err) {
