@@ -123,12 +123,12 @@ export class Qdrant implements VectorStore {
     scoreThreshold?: number,
   ): Promise<VectorStoreResult[]> {
     const queryFilter = this.createFilter(filters);
-    const searchParams: Record<string, any> = {
+    const searchParams = {
       vector: query,
       filter: queryFilter,
       limit,
+      ...(scoreThreshold != null ? { score_threshold: scoreThreshold } : {}),
     };
-    if (scoreThreshold != null) searchParams.score_threshold = scoreThreshold;
     const results = await this.client.search(this.collectionName, searchParams);
 
     return results.map((hit) => ({

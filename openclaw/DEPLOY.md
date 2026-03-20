@@ -60,34 +60,62 @@ Record this for rollback reference.
 ```bash
 cd ~
 git clone https://github.com/jamebobob/mem0.git mem0-fork
-cd ~/mem0-fork/openclaw
 ```
 
-### 2. Install dependencies and build
+### 2. Build the forked SDK
+
+The plugin depends on the forked mem0 TypeScript SDK via a `file:`
+dependency (`"mem0ai": "file:../mem0-ts"` in `openclaw/package.json`).
+The SDK must be built first so that `mem0-ts/dist/` exists before the
+plugin's `npm install` resolves it.
 
 ```bash
+cd ~/mem0-fork/mem0-ts
+npm install
+npm run build
+```
+
+**Verify SDK build succeeds before continuing.** You should see:
+
+```
+CJS dist/oss/index.js     ~177 KB
+ESM dist/oss/index.mjs    ~173 KB
+```
+
+If the build fails, stop. Do not proceed to the next step.
+
+### 3. Build the plugin
+
+```bash
+cd ~/mem0-fork/openclaw
 npm install
 npx tsup
 ```
 
-**Verify build succeeds before continuing.** You should see:
+`npm install` creates a symlink at `node_modules/mem0ai -> ../mem0-ts`.
+The plugin uses dynamic `import("mem0ai/oss")` at runtime, so the
+forked SDK's patched code (dedup gates, score_threshold forwarding,
+JSON resilience, max_tokens fix) is loaded from the symlinked dist,
+not bundled into the plugin's own `dist/index.js`.
+
+**Verify plugin build succeeds.** You should see:
 
 ```
-ESM dist/index.js     ~51 KB
+ESM dist/index.js     ~52 KB
 DTS dist/index.d.ts   ~3.5 KB
 ```
 
 If the build fails, stop. Do not proceed to the next step.
 
-### 3. Run the test suite
+### 4. Run the test suite
 
 ```bash
 npx vitest run
 ```
 
-Expected: 48 tests passing across 5 test files. If any fail, stop.
+Expected: 53 tests passing across 5 test files. If any fail, stop.
 
-### 4. Link the fork plugin
+### 5. Link the fork plugin
 
 ```bash
 openclaw plugins install -l ~/mem0-fork/openclaw
@@ -110,7 +138,7 @@ The plugin config (`mode`, `userId`, `oss`, `agentMemory`, etc.) should
 be preserved from the existing `openclaw.json`. The link command changes
 where the code is loaded from, not the config.
 
-### 5. Find the gateway service name
+### 6. Find the gateway service name
 
 ```bash
 systemctl list-units --type=service | grep -i claw
@@ -118,7 +146,7 @@ systemctl list-units --type=service | grep -i claw
 
 Note the exact service name (e.g. `openclaw-gateway.service` or similar).
 
-### 6. Restart the gateway
+### 7. Restart the gateway
 
 ```bash
 sudo systemctl restart <gateway-service-name>
@@ -230,7 +258,7 @@ curl -X PUT "http://localhost:6333/collections/memories/snapshots/recover" \
 
 ### After 7 clean days
 
-- verify-patches.py is deprecated. The fork's 48-test suite is the
+- verify-patches.py is deprecated. The fork's 53-test suite is the
   new verification mechanism.
 - Add a deprecation note to verify-patches.py (don't delete it --
   historical reference).

@@ -495,7 +495,8 @@ export class Memory {
 
     // Search vector store
     const queryEmbedding = await this.embedder.embed(query);
-    const searchThreshold = config.threshold != null ? config.threshold : undefined;
+    const searchThreshold =
+      config.threshold != null ? config.threshold : undefined;
     const memories = await this.vectorStore.search(
       queryEmbedding,
       limit,
@@ -696,18 +697,24 @@ export class Memory {
     if (vs.client && vs.collectionName) {
       try {
         const hashFilter: any[] = [{ key: "hash", match: { value: dataHash } }];
-        if (metadata.userId) hashFilter.push({ key: "userId", match: { value: metadata.userId } });
+        if (metadata.userId)
+          hashFilter.push({ key: "userId", match: { value: metadata.userId } });
         const existing = await vs.client.scroll(vs.collectionName, {
           filter: { must: hashFilter },
           limit: 1,
           with_payload: false,
         });
         if (existing.points && existing.points.length > 0) {
-          console.log(`[mem0] Exact dupe skipped (hash: ${dataHash}, pool: ${metadata.userId || "none"}): "${data.substring(0, 80)}"`);
+          console.log(
+            `[mem0] Exact dupe skipped (hash: ${dataHash}, pool: ${metadata.userId || "none"}): "${data.substring(0, 80)}"`,
+          );
           return String(existing.points[0].id);
         }
       } catch (e: any) {
-        console.error("[mem0] Hash dedup check failed, proceeding with insert:", e.message);
+        console.error(
+          "[mem0] Hash dedup check failed, proceeding with insert:",
+          e.message,
+        );
       }
     }
 
@@ -718,7 +725,11 @@ export class Memory {
     if (vs.client && vs.collectionName) {
       try {
         const cosineFilter: any[] = [];
-        if (metadata.userId) cosineFilter.push({ key: "userId", match: { value: metadata.userId } });
+        if (metadata.userId)
+          cosineFilter.push({
+            key: "userId",
+            match: { value: metadata.userId },
+          });
         const nearMatches = await vs.client.search(vs.collectionName, {
           vector: embedding,
           filter: cosineFilter.length > 0 ? { must: cosineFilter } : undefined,
@@ -727,11 +738,16 @@ export class Memory {
           with_payload: true,
         });
         if (nearMatches.length > 0 && nearMatches[0].payload?.data) {
-          console.log(`[mem0] Near-dupe skipped (cosine: ${nearMatches[0].score.toFixed(3)}, pool: ${metadata.userId || "none"}): "${data.substring(0, 60)}" ~ "${nearMatches[0].payload.data.substring(0, 60)}"`);
+          console.log(
+            `[mem0] Near-dupe skipped (cosine: ${nearMatches[0].score.toFixed(3)}, pool: ${metadata.userId || "none"}): "${data.substring(0, 60)}" ~ "${nearMatches[0].payload.data.substring(0, 60)}"`,
+          );
           return String(nearMatches[0].id);
         }
       } catch (e: any) {
-        console.error("[mem0] Cosine dedup check failed, proceeding with insert:", e.message);
+        console.error(
+          "[mem0] Cosine dedup check failed, proceeding with insert:",
+          e.message,
+        );
       }
     }
 
