@@ -1,6 +1,6 @@
 # Contributing to openclaw-mem0
 
-Guidelines for the OpenClaw Mem0 plugin in the jamebobob/mem0 fork.
+Guidelines for the OpenClaw Mem0 plugin in the jamebobob/mem0-vigil fork.
 
 ---
 

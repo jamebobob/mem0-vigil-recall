@@ -1,7 +1,7 @@
 # Deploying the Mem0 Fork to Gateway
 
 Step-by-step guide for switching gateway's openclaw-mem0 plugin from
-patched node_modules to the jamebobob/mem0 fork.
+patched node_modules to the jamebobob/mem0-vigil fork.
 
 **Audience:** A future Opus or Claude Code session deploying to gateway
 without prior context. Commands are copy-pasteable.
@@ -59,7 +59,7 @@ Record this for rollback reference.
 
 ```bash
 cd ~
-git clone https://github.com/jamebobob/mem0.git mem0-fork
+git clone https://github.com/jamebobob/mem0-vigil.git mem0-fork
 ```
 
 ### 2. Build the forked SDK

@@ -2,13 +2,13 @@
 
 ## Summary
 
-Forked `mem0ai/mem0` under `jamebobob/mem0` on GitHub. Applied 6 core
+Forked `mem0ai/mem0` under `jamebobob/mem0-vigil` on GitHub. Applied 6 core
 Mem0 SDK patches as proper commits (from 12 original node_modules
 patches — 2 were already fixed upstream). Built 4 multi-pool plugin
 patches and 3 Vigil modules (recall telemetry, capture filter, recall
 guard). All code pushed to GitHub.
 
-**Fork:** https://github.com/jamebobob/mem0
+**Fork:** https://github.com/jamebobob/mem0-vigil
 **Total commits in fork:** 1959 (upstream history + 18 new commits)
 **Canonical roadmap:** `~/Downloads/project-vigil-v5.md`
 
