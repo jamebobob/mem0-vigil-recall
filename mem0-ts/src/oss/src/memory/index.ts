@@ -690,6 +690,7 @@ export class Memory {
     existingEmbeddings: Record<string, number[]>,
     metadata: Record<string, any>,
   ): Promise<string> {
+    data = data.replace(/\u2014/g, ", ");
     const dataHash = createHash("md5").update(data).digest("hex");
 
     // Hash dedup: skip if an identical fact (by MD5) already exists in the same pool
@@ -721,7 +722,7 @@ export class Memory {
     const embedding =
       existingEmbeddings[data] || (await this.embedder.embed(data));
 
-    // Cosine dedup: skip if a near-identical fact (cosine >= 0.98) exists in the same pool
+    // Cosine dedup: skip if a near-identical fact (cosine >= 0.90) exists in the same pool
     if (vs.client && vs.collectionName) {
       try {
         const cosineFilter: any[] = [];
@@ -734,7 +735,7 @@ export class Memory {
           vector: embedding,
           filter: cosineFilter.length > 0 ? { must: cosineFilter } : undefined,
           limit: 1,
-          score_threshold: 0.98,
+          score_threshold: 0.90,
           with_payload: true,
         });
         if (nearMatches.length > 0 && nearMatches[0].payload?.data) {
@@ -777,6 +778,7 @@ export class Memory {
     existingEmbeddings: Record<string, number[]>,
     metadata: Record<string, any> = {},
   ): Promise<string> {
+    data = data.replace(/\u2014/g, ", ");
     const existingMemory = await this.vectorStore.get(memoryId);
     if (!existingMemory) {
       throw new Error(`Memory with ID ${memoryId} not found`);
