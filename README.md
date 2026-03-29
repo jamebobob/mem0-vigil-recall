@@ -1,171 +1,59 @@
-<p align="center">
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="docs/images/banner-sm.png" width="800px" alt="Mem0 - The Memory Layer for Personalized AI">
-  </a>
-</p>
-<p align="center" style="display: flex; justify-content: center; gap: 20px; align-items: center;">
-  <a href="https://trendshift.io/repositories/11194" target="blank">
-    <img src="https://trendshift.io/api/badge/repositories/11194" alt="mem0ai%2Fmem0 | Trendshift" width="250" height="55"/>
-  </a>
-</p>
+# mem0-vigil-recall
 
-<p align="center">
-  <a href="https://mem0.ai">Learn more</a>
-  ·
-  <a href="https://mem0.dev/DiG">Join Discord</a>
-  ·
-  <a href="https://mem0.dev/demo">Demo</a>
-  ·
-  <a href="https://mem0.dev/openmemory">OpenMemory</a>
-</p>
+A fork of [mem0ai/mem0](https://github.com/mem0ai/mem0) that fixes what we found after running mem0 in production for 32 days and reading every entry it created.
 
-<p align="center">
-  <a href="https://mem0.dev/DiG">
-    <img src="https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white" alt="Mem0 Discord">
-  </a>
-  <a href="https://pepy.tech/project/mem0ai">
-    <img src="https://img.shields.io/pypi/dm/mem0ai" alt="Mem0 PyPI - Downloads">
-  </a>
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="https://img.shields.io/github/commit-activity/m/mem0ai/mem0?style=flat-square" alt="GitHub commit activity">
-  </a>
-  <a href="https://pypi.org/project/mem0ai" target="blank">
-    <img src="https://img.shields.io/pypi/v/mem0ai?color=%2334D058&label=pypi%20package" alt="Package version">
-  </a>
-  <a href="https://www.npmjs.com/package/mem0ai" target="blank">
-    <img src="https://img.shields.io/npm/v/mem0ai" alt="Npm package">
-  </a>
-  <a href="https://www.ycombinator.com/companies/mem0">
-    <img src="https://img.shields.io/badge/Y%20Combinator-S24-orange?style=flat-square" alt="Y Combinator S24">
-  </a>
-</p>
+## The short version
 
-<p align="center">
-  <a href="https://mem0.ai/research"><strong>📄 Building Production-Ready AI Agents with Scalable Long-Term Memory →</strong></a>
-</p>
-<p align="center">
-  <strong>⚡ +26% Accuracy vs. OpenAI Memory • 🚀 91% Faster • 💰 90% Fewer Tokens</strong>
-</p>
+We ran mem0 with one AI agent, one human, daily conversations, Qdrant backend. Two extraction models: gemma2:2b (local, first 20 days) then Claude Sonnet 4.6 (last 12). After the agent started "remembering" things nobody ever said, we audited the entire collection.
 
-> **🎉 mem0ai v1.0.0 is now available!** This major release includes API modernization, improved vector store support, and enhanced GCP integration. [See migration guide →](MIGRATION_GUIDE_v1.0.md)
+10,134 entries. 97.8% were junk. Hallucinated facts, credential fragments, duplicate entries with minor rewording, system prompts stored as memories. Only 38 entries in the whole collection were clean enough to keep as written. The rest were deleted or rewritten from scratch.
 
-##  🔥 Research Highlights
-- **+26% Accuracy** over OpenAI Memory on the LOCOMO benchmark
-- **91% Faster Responses** than full-context, ensuring low-latency at scale
-- **90% Lower Token Usage** than full-context, cutting costs without compromise
-- [Read the full paper](https://mem0.ai/research)
+The full audit methodology and findings are documented in [mem0ai/mem0#4573](https://github.com/mem0ai/mem0/issues/4573).
 
-# Introduction
+This fork contains every fix we built along the way.
 
-[Mem0](https://mem0.ai) ("mem-zero") enhances AI assistants and agents with an intelligent memory layer, enabling personalized AI interactions. It remembers user preferences, adapts to individual needs, and continuously learns over time—ideal for customer support chatbots, AI assistants, and autonomous systems.
+## What's different from upstream
 
-### Key Features & Use Cases
+### Core SDK patches
 
-**Core Capabilities:**
-- **Multi-Level Memory**: Seamlessly retains User, Session, and Agent state with adaptive personalization
-- **Developer-Friendly**: Intuitive API, cross-platform SDKs, and a fully managed service option
+Seven patches to the mem0 TypeScript OSS SDK. Corresponding upstream PRs sit in a months-long backlog.
 
-**Applications:**
-- **AI Assistants**: Consistent, context-rich conversations
-- **Customer Support**: Recall past tickets and user history for tailored help
-- **Healthcare**: Track patient preferences and history for personalized care
-- **Productivity & Gaming**: Adaptive workflows and environments based on user behavior
+| Patch | What it fixes |
+|-------|---------------|
+| **Score threshold passthrough** | `search()` accepts a threshold parameter but never forwards it to Qdrant. Every search returns the full result set regardless of relevance. Two patches wire `score_threshold` through both layers: from the `QdrantVectorStore.search()` method to the actual Qdrant query, and from `Memory.search()` down to the vector store. |
+| **MD5 hash dedup** | Identical text gets stored as separate entries because `createMemory()` has no duplicate check. This adds an MD5 hash gate that catches exact matches before they hit the vector store. |
+| **Cosine similarity dedup** | Near-identical text (minor rewording, same meaning) also creates duplicates. This adds a cosine similarity check against existing entries before insert. Catches what hash dedup misses. |
+| **JSON extraction fallback** | When the LLM wraps its response in markdown code fences, `removeCodeBlocks()` fails to extract the JSON. Memories get silently dropped. This adds a fallback parser with input scoping to avoid false positives on code-heavy content. |
+| **Anthropic max_tokens bump** | The Anthropic LLM adapter hardcodes `max_tokens: 4096`. Complex extractions get truncated mid-sentence and stored as broken fragments. Bumped to 8192. |
+| **Embedding dimension auto-detect** | When using a non-OpenAI embedder, Qdrant throws a dimension mismatch because the SDK assumes OpenAI's embedding size. This patch auto-detects the actual dimension from the configured embedder. |
 
-## 🚀 Quickstart Guide <a name="quickstart"></a>
+### Multi-pool memory isolation
 
-Choose between our hosted platform or self-hosted package:
+Upstream mem0 uses a single flat namespace. Every agent reads and writes the same pool. If you run multiple agents (say, one for private DMs and several for group contexts), they all share memories with no boundaries.
 
-### Hosted Platform
+This fork adds configurable named pools via an `agentMemory` config block. Each agent gets a capture pool (where it writes) and a recall list (where it reads). A boundary enforcement function prevents agents from accessing pools they're not configured for.
 
-Get up and running in minutes with automatic updates, analytics, and enterprise security.
+The main agent can read all pools. Group agents only see their own. No code changes needed in the calling application: pool routing is handled inside the plugin based on agent identity.
 
-1. Sign up on [Mem0 Platform](https://app.mem0.ai)
-2. Embed the memory layer via SDK or API keys
+### Vigil modules (3 independent modules)
 
-### Self-Hosted (Open Source)
+Built during the audit to understand what was going wrong and prevent it from happening again.
 
-Install the sdk via pip:
+**Recall telemetry** logs every memory recall event to a JSONL file with timestamps, query text, result count, scores, and session context. Also detects recall gaps (queries that returned zero results) and logs them to a separate gap journal. This is how we discovered that the agent was recalling hallucinated content: the telemetry showed high-confidence scores on entries that didn't correspond to any real conversation.
 
-```bash
-pip install mem0ai
-```
+**Capture filter** restricts auto-capture to user-role messages only. Without this, system messages, compaction artifacts, and LLM context management summaries all get extracted as "memories." This was the single biggest source of junk in our audit: the system talking to itself and mem0 dutifully recording every word.
 
-Install sdk via npm:
-```bash
-npm install mem0ai
-```
+**Recall guard** filters search results by privacy context. A memory captured in a private DM doesn't surface in a group chat. A group memory doesn't leak into a different group. Context-aware, not keyword-based.
 
-### Basic Usage
+Each module is in its own file with its own test suite. Any one of them can be disabled by removing a single import without touching the others.
 
-Mem0 requires an LLM to function, with `gpt-4.1-nano-2025-04-14 from OpenAI as the default. However, it supports a variety of LLMs; for details, refer to our [Supported LLMs documentation](https://docs.mem0.ai/components/llms/overview).
+### Documentation
 
-First step is to instantiate the memory:
+- **DEPLOY.md**: Step-by-step deployment guide with rollback plan
+- **CONTRIBUTING.md**: Multi-pool architecture overview, module guide, and documented anti-patterns (things we tried or evaluated and decided against, with reasons)
+- **CHANGELOG.md**: Version history for the OpenClaw plugin
 
-```python
-from openai import OpenAI
-from mem0 import Memory
+## Test suite
 
-openai_client = OpenAI()
-memory = Memory()
+53 TypeScript tests covering config validation, multi-pool routing, capture filtering, recall guard boundaries, telemetry output, and SQLite resilience. 9 Python tests for the never-recalled cleanup report generator.
 
-def chat_with_memories(message: str, user_id: str = "default_user") -> str:
-    # Retrieve relevant memories
-    relevant_memories = memory.search(query=message, user_id=user_id, limit=3)
-    memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-
-    # Generate Assistant response
-    system_prompt = f"You are a helpful AI. Answer the question based on query and memories.\nUser Memories:\n{memories_str}"
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": message}]
-    response = openai_client.chat.completions.create(model="gpt-4.1-nano-2025-04-14", messages=messages)
-    assistant_response = response.choices[0].message.content
-
-    # Create new memories from the conversation
-    messages.append({"role": "assistant", "content": assistant_response})
-    memory.add(messages, user_id=user_id)
-
-    return assistant_response
-
-def main():
-    print("Chat with AI (type 'exit' to quit)")
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() == 'exit':
-            print("Goodbye!")
-            break
-        print(f"AI: {chat_with_memories(user_input)}")
-
-if __name__ == "__main__":
-    main()
-```
-
-For detailed integration steps, see the [Quickstart](https://docs.mem0.ai/quickstart) and [API Reference](https://docs.mem0.ai/api-reference).
-
-## 🔗 Integrations & Demos
-
-- **ChatGPT with Memory**: Personalized chat powered by Mem0 ([Live Demo](https://mem0.dev/demo))
-- **Browser Extension**: Store memories across ChatGPT, Perplexity, and Claude ([Chrome Extension](https://chromewebstore.google.com/detail/onihkkbipkfeijkadecaafbgagkhglop?utm_source=item-share-cb))
-- **Langgraph Support**: Build a customer bot with Langgraph + Mem0 ([Guide](https://docs.mem0.ai/integrations/langgraph))
-- **CrewAI Integration**: Tailor CrewAI outputs with Mem0 ([Example](https://docs.mem0.ai/integrations/crewai))
-
-## 📚 Documentation & Support
-
-- Full docs: https://docs.mem0.ai
-- Community: [Discord](https://mem0.dev/DiG) · [Twitter](https://x.com/mem0ai)
-- Contact: founders@mem0.ai
-
-## Citation
-
-We now have a paper you can cite:
-
-```bibtex
-@article{mem0,
-  title={Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory},
-  author={Chhikara, Prateek and Khant, Dev and Aryan, Saket and Singh, Taranjeet and Yadav, Deshraj},
-  journal={arXiv preprint arXiv:2504.19413},
-  year={2025}
-}
-```
-
-## ⚖️ License
-
-Apache 2.0 — see the [LICENSE](https://github.com/mem0ai/mem0/blob/main/LICENSE) file for details.
